@@ -3,12 +3,12 @@ BUILDDIR = build
 OUTPUTEXE = login
 
 CXX = g++
-CXXFLAGS = -m64 -fno-strict-aliasing -pedantic -Wno-unused-parameter -Wall -Wextra -pthread --std=c++11
+CXXFLAGS = -m64 -fno-strict-aliasing -pedantic -Wno-deprecated-declarations -Wno-unused-parameter -Wall -Wextra -pthread --std=c++11
 LFLAGS = -Wl,-t -lcrypto
 
 DEBUG ?= 0
 ifneq ($(DEBUG), 0)
-	CXXFLAGS += -g -O0
+	CXXFLAGS += -g -Og
 else
 	CXXFLAGS += -O2
 endif

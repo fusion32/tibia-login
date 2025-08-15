@@ -1,0 +1,22 @@
+# Basic SYSTEMD service file for the Tibia Login Server
+
+[Unit]
+Description=Tibia Login Server
+After=network.target
+Requires=tibia-querymanager.service
+
+[Install]
+WantedBy=multi-user.target
+
+[Service]
+Type=simple
+User=tibia-login
+Group=tibia-login
+ExecStart=/opt/tibia/login/login
+WorkingDirectory=/opt/tibia/login/
+Restart=always
+RestartSec=10
+LimitCORE=infinity
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=%n

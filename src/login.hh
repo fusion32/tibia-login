@@ -290,7 +290,7 @@ struct TWriteBuffer{
 	}
 
 	void Rewrite16(int Position, uint16 Value){
-		if((Position + 2) <= this->Position){
+		if((Position + 2) <= this->Position && !this->Overflowed()){
 			BufferWrite16LE(this->Buffer + Position, Value);
 		}
 	}

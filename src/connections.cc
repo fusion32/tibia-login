@@ -265,8 +265,8 @@ void ProcessConnections(void){
 		}
 
 		if(AssignConnection(Socket, Addr, Port) == NULL){
-			LOG_ERR("Rejecting connection from %08X due to max number of"
-					" connections being reached (%d)", Addr, g_MaxConnections);
+			LOG_ERR("Rejecting connection from %08X:%d due to max number of"
+					" connections being reached (%d)", Addr, Port, g_MaxConnections);
 			close(Socket);
 		}
 	}

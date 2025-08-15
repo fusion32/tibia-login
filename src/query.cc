@@ -147,7 +147,7 @@ int ExecuteQuery(TQueryManagerConnection *Connection, bool AutoReconnect,
 	}
 
 	const int MaxAttempts = 2;
-	for(int Attempts = 0; true; Attempts += 1){
+	for(int Attempt = 1; true; Attempt += 1){
 		int WriteSize = WriteBuffer->Position;
 		if(!IsConnected(Connection)){
 			if(!AutoReconnect){
@@ -173,7 +173,7 @@ int ExecuteQuery(TQueryManagerConnection *Connection, bool AutoReconnect,
 
 		if(!WriteExact(Connection->Socket, Connection->Buffer, WriteSize)){
 			Disconnect(Connection);
-			if(Attempts >= MaxAttempts){
+			if(Attempt >= MaxAttempts){
 				LOG_ERR("Failed to write request");
 				return QUERY_STATUS_FAILED;
 			}
@@ -183,7 +183,7 @@ int ExecuteQuery(TQueryManagerConnection *Connection, bool AutoReconnect,
 		uint8 Help[4];
 		if(!ReadExact(Connection->Socket, Help, 2)){
 			Disconnect(Connection);
-			if(Attempts >= MaxAttempts){
+			if(Attempt >= MaxAttempts){
 				LOG_ERR("Failed to read response size");
 				return QUERY_STATUS_FAILED;
 			}
