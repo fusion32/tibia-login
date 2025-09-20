@@ -13,7 +13,12 @@
 #	error "Operating system not currently supported."
 #endif
 
+#if TIBIA772
+static const int TERMINALVERSION[]	= {772, 772, 772};
+#else
 static const int TERMINALVERSION[]	= {770, 770, 770};
+#endif
+
 static RSAKey *g_PrivateKey			= NULL;
 static int g_Listener				= -1;
 static TConnection *g_Connections	= NULL;
@@ -474,7 +479,10 @@ void ProcessLoginRequest(TConnection *Connection){
 		return;
 	}
 
-	if(!RSADecrypt(g_PrivateKey, AsymmetricData, sizeof(AsymmetricData))){
+	// IMPORTANT(fusion): Without a checksum, there is no way of validating
+	// the asymmetric data. The best we can do is to verify that the first
+	// plaintext byte is ZERO, but that alone isn't enough.
+	if(!RSADecrypt(g_PrivateKey, AsymmetricData, sizeof(AsymmetricData)) || AsymmetricData[0] != 0){
 		LOG_ERR("Failed to decrypt asymmetric data from %s",
 				Connection->RemoteAddress);
 		CloseConnection(Connection);
