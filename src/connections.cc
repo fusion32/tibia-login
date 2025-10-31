@@ -496,21 +496,26 @@ void ProcessLoginRequest(TConnection *Connection){
 	Connection->XTEA[2] = Buffer.Read32();
 	Connection->XTEA[3] = Buffer.Read32();
 
-	if(TerminalType < 0 || TerminalType >= NARRAY(TERMINALVERSION)
-			|| TERMINALVERSION[TerminalType] != TerminalVersion){
-		SendLoginError(Connection,
-				"Your terminal version is too old.\n"
-				"Please get a new version at\n"
-				"http://www.tibia.com.");
-		return;
-	}
-
 	char Password[30];
 	int AccountID = Buffer.Read32();
 	Buffer.ReadString(Password, sizeof(Password));
 	if(Buffer.Overflowed()){
 		LOG_ERR("Malformed asymmetric data from %s", Connection->RemoteAddress);
 		CloseConnection(Connection);
+		return;
+	}
+
+	if(AccountID <= 0){
+		SendLoginError(Connection, "You must enter an account number.");
+		return;
+	}
+
+	if(TerminalType < 0 || TerminalType >= NARRAY(TERMINALVERSION)
+			|| TERMINALVERSION[TerminalType] != TerminalVersion){
+		SendLoginError(Connection,
+				"Your terminal version is too old.\n"
+				"Please get a new version at\n"
+				"http://www.tibia.com.");
 		return;
 	}
 
