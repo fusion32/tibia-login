@@ -1,6 +1,6 @@
 #include "common.hh"
 
-static int g_LastStatusRefresh = 0;
+static int g_LastStatusRefresh;
 static char g_StatusString[KB(2)];
 
 struct XMLBuffer{
@@ -160,7 +160,7 @@ const char *GetStatusString(void){
 		if(GetWorld(g_Config.StatusWorld, &World) == 0){
 			WorldName = World.Name;
 			if(World.LastStartup != 0 && World.LastStartup > World.LastShutdown){
-				Uptime = (int)time(NULL) - World.LastStartup;
+				Uptime = TimeNow - World.LastStartup;
 			}
 			NumPlayers = World.NumPlayers;
 			MaxPlayers = World.MaxPlayers;

@@ -135,8 +135,8 @@ static TConnection *AssignConnection(int Socket, uint32 Addr, uint16 Port){
 				"%d.%d.%d.%d:%d",
 				((Connection->IPAddress >> 24) & 0xFF),
 				((Connection->IPAddress >> 16) & 0xFF),
-				((Connection->IPAddress >>	8) & 0xFF),
-				((Connection->IPAddress >>	0) & 0xFF),
+				((Connection->IPAddress >>  8) & 0xFF),
+				((Connection->IPAddress >>  0) & 0xFF),
 				(int)Port);
 		LOG("Connection %s assigned to slot %d",
 				Connection->RemoteAddress, ConnectionIndex);
@@ -577,8 +577,8 @@ void ProcessLoginRequest(TConnection *Connection){
 	StringBufFormat(IPString, "%d.%d.%d.%d",
 			((Connection->IPAddress >> 24) & 0xFF),
 			((Connection->IPAddress >> 16) & 0xFF),
-			((Connection->IPAddress >>	8) & 0xFF),
-			((Connection->IPAddress >>	0) & 0xFF));
+			((Connection->IPAddress >>  8) & 0xFF),
+			((Connection->IPAddress >>  0) & 0xFF));
 
 	int NumCharacters = 0;
 	int PremiumDays = 0;

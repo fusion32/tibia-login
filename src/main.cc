@@ -323,23 +323,23 @@ int UTF8EncodeOne(uint8 *Dest, int DestCapacity, int Codepoint){
 			}
 
 			case 2:{
-				Dest[0] = (uint8)(0xC0 | (0x1F & (Codepoint >>	6)));
-				Dest[1] = (uint8)(0x80 | (0x3F & (Codepoint >>	0)));
+				Dest[0] = (uint8)(0xC0 | (0x1F & (Codepoint >>  6)));
+				Dest[1] = (uint8)(0x80 | (0x3F & (Codepoint >>  0)));
 				break;
 			}
 
 			case 3:{
 				Dest[0] = (uint8)(0xE0 | (0x0F & (Codepoint >> 12)));
-				Dest[1] = (uint8)(0x80 | (0x3F & (Codepoint >>	6)));
-				Dest[2] = (uint8)(0x80 | (0x3F & (Codepoint >>	0)));
+				Dest[1] = (uint8)(0x80 | (0x3F & (Codepoint >>  6)));
+				Dest[2] = (uint8)(0x80 | (0x3F & (Codepoint >>  0)));
 				break;
 			}
 
 			case 4:{
 				Dest[0] = (uint8)(0xF0 | (0x07 & (Codepoint >> 18)));
 				Dest[1] = (uint8)(0x80 | (0x3F & (Codepoint >> 12)));
-				Dest[2] = (uint8)(0x80 | (0x3F & (Codepoint >>	6)));
-				Dest[3] = (uint8)(0x80 | (0x3F & (Codepoint >>	0)));
+				Dest[2] = (uint8)(0x80 | (0x3F & (Codepoint >>  6)));
+				Dest[3] = (uint8)(0x80 | (0x3F & (Codepoint >>  0)));
 				break;
 			}
 		}
