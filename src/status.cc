@@ -1,13 +1,7 @@
 #include "common.hh"
 
-// IMPORTANT(fusion): We want connections to use the status string directly for
-// output, but because it could be refreshed while connections are still using
-// it, we need to have them buffered, to allow old versions to remain valid, at
-// least for a couple refreshes. Note that `
-
 static int g_LastStatusRefresh = 0;
-static int g_StatusStringIndex = 0;
-static char g_StatusString[3][KB(2)];
+static char g_StatusString[KB(2)];
 
 struct XMLBuffer{
 	char *Data;
@@ -194,10 +188,9 @@ const char *GetStatusString(void){
 			Motd += 1;
 		}
 
-		g_StatusStringIndex = (g_StatusStringIndex + 1) % NARRAY(g_StatusString);
 		XMLBuffer Buffer = {};
-		Buffer.Data = g_StatusString[g_StatusStringIndex];
-		Buffer.Size = sizeof(g_StatusString[g_StatusStringIndex]);
+		Buffer.Data = g_StatusString;
+		Buffer.Size = sizeof(g_StatusString);
 		XMLAppendString(&Buffer, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
 		XMLAppendString(&Buffer, "<tsqp version=\"1.0\">");
 		XMLAppendStringF(&Buffer,
@@ -217,6 +210,6 @@ const char *GetStatusString(void){
 		g_LastStatusRefresh = TimeNow;
 	}
 
-	return g_StatusString[g_StatusStringIndex];
+	return g_StatusString;
 }
 
