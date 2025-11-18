@@ -1,18 +1,13 @@
-#include "login.hh"
+#include "common.hh"
 
-// TODO(fusion): Support windows eventually?
-#if OS_LINUX
-#	include <errno.h>
-#	include <netdb.h>
-#	include <sys/socket.h>
-#	include <unistd.h>
-#else
-#	error "Operating system not currently supported."
-#endif
+#include <errno.h>
+#include <netdb.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 static TQueryManagerConnection *g_QueryManagerConnection;
 
-bool ResolveHostName(const char *HostName, in_addr_t *OutAddr){
+static bool ResolveHostName(const char *HostName, in_addr_t *OutAddr){
 	ASSERT(HostName != NULL && OutAddr != NULL);
 	addrinfo *Result = NULL;
 	addrinfo Hints = {};
@@ -37,65 +32,6 @@ bool ResolveHostName(const char *HostName, in_addr_t *OutAddr){
 	}
 	freeaddrinfo(Result);
 	return Resolved;
-}
-
-bool Connect(TQueryManagerConnection *Connection){
-	if(Connection->Socket != -1){
-		LOG_ERR("Already connected");
-		return false;
-	}
-
-	in_addr_t Addr;
-	if(!ResolveHostName(g_QueryManagerHost, &Addr)){
-		LOG_ERR("Failed to resolve query manager's host name \"%s\"", g_QueryManagerHost);
-		return false;
-	}
-
-	Connection->Socket = socket(AF_INET, SOCK_STREAM, 0);
-	if(Connection->Socket == -1){
-		LOG_ERR("Failed to create socket: (%d) %s", errno, strerrordesc_np(errno));
-		return false;
-	}
-
-	sockaddr_in QueryManagerAddress = {};
-	QueryManagerAddress.sin_family = AF_INET;
-	QueryManagerAddress.sin_port = htons((uint16)g_QueryManagerPort);
-	QueryManagerAddress.sin_addr.s_addr = Addr;
-	if(connect(Connection->Socket, (sockaddr*)&QueryManagerAddress, sizeof(QueryManagerAddress)) == -1){
-		LOG_ERR("Failed to connect: (%d) %s", errno, strerrordesc_np(errno));
-		Disconnect(Connection);
-		return false;
-	}
-
-	TWriteBuffer WriteBuffer = PrepareQuery(Connection, 0);
-	WriteBuffer.Write8((uint8)APPLICATION_TYPE_LOGIN);
-	WriteBuffer.WriteString(g_QueryManagerPassword);
-	int Status = ExecuteQuery(Connection, false, &WriteBuffer, NULL);
-	if(Status != QUERY_STATUS_OK){
-		LOG_ERR("Failed to login to query manager (%d)", Status);
-		Disconnect(Connection);
-		return false;
-	}
-
-	return true;
-}
-
-void Disconnect(TQueryManagerConnection *Connection){
-	if(Connection->Socket != -1){
-		close(Connection->Socket);
-		Connection->Socket = -1;
-	}
-}
-
-bool IsConnected(TQueryManagerConnection *Connection){
-	return Connection->Socket != -1;
-}
-
-TWriteBuffer PrepareQuery(TQueryManagerConnection *Connection, int QueryType){
-	TWriteBuffer WriteBuffer(Connection->Buffer, sizeof(Connection->Buffer));
-	WriteBuffer.Write16(0); // Request Size
-	WriteBuffer.Write8((uint8)QueryType);
-	return WriteBuffer;
 }
 
 static bool WriteExact(int Fd, const uint8 *Buffer, int Size){
@@ -126,12 +62,73 @@ static bool ReadExact(int Fd, uint8 *Buffer, int Size){
 	return true;
 }
 
+bool Connect(TQueryManagerConnection *Connection){
+	if(Connection->Socket != -1){
+		LOG_ERR("Already connected");
+		return false;
+	}
+
+	in_addr_t Addr;
+	if(!ResolveHostName(g_Config.QueryManagerHost, &Addr)){
+		LOG_ERR("Failed to resolve query manager's host name \"%s\"", g_Config.QueryManagerHost);
+		return false;
+	}
+
+	Connection->Socket = socket(AF_INET, SOCK_STREAM, 0);
+	if(Connection->Socket == -1){
+		LOG_ERR("Failed to create socket: (%d) %s", errno, strerrordesc_np(errno));
+		return false;
+	}
+
+	sockaddr_in QueryManagerAddress = {};
+	QueryManagerAddress.sin_family = AF_INET;
+	QueryManagerAddress.sin_port = htons((uint16)g_Config.QueryManagerPort);
+	QueryManagerAddress.sin_addr.s_addr = Addr;
+	if(connect(Connection->Socket, (sockaddr*)&QueryManagerAddress, sizeof(QueryManagerAddress)) == -1){
+		LOG_ERR("Failed to connect: (%d) %s", errno, strerrordesc_np(errno));
+		Disconnect(Connection);
+		return false;
+	}
+
+	uint8 LoginBuffer[1024];
+	TWriteBuffer WriteBuffer = PrepareQuery(QUERY_LOGIN, LoginBuffer, sizeof(LoginBuffer));
+	WriteBuffer.Write8((uint8)APPLICATION_TYPE_LOGIN);
+	WriteBuffer.WriteString(g_Config.QueryManagerPassword);
+	int Status = ExecuteQuery(Connection, false, &WriteBuffer, NULL);
+	if(Status != QUERY_STATUS_OK){
+		LOG_ERR("Failed to login to query manager (%d)", Status);
+		Disconnect(Connection);
+		return false;
+	}
+
+	return true;
+}
+
+void Disconnect(TQueryManagerConnection *Connection){
+	if(Connection->Socket != -1){
+		close(Connection->Socket);
+		Connection->Socket = -1;
+	}
+}
+
+bool IsConnected(TQueryManagerConnection *Connection){
+	return Connection->Socket != -1;
+}
+
+TWriteBuffer PrepareQuery(int QueryType, uint8 *Buffer, int BufferSize){
+	TWriteBuffer WriteBuffer(Buffer, BufferSize);
+	WriteBuffer.Write16(0); // Request Size
+	WriteBuffer.Write8((uint8)QueryType);
+	return WriteBuffer;
+}
+
 int ExecuteQuery(TQueryManagerConnection *Connection, bool AutoReconnect,
 		TWriteBuffer *WriteBuffer, TReadBuffer *OutReadBuffer){
-	ASSERT(WriteBuffer != NULL
-		&& WriteBuffer->Buffer == Connection->Buffer
-		&& WriteBuffer->Size == sizeof(Connection->Buffer)
-		&& WriteBuffer->Position > 2);
+	// IMPORTANT(fusion): This is similar to the Go version where there is no
+	// connection buffer, and the response is read into the same buffer used
+	// by `WriteBuffer. This helps prevent allocating and moving data around
+	// when reconnecting in the middle of a query.
+	ASSERT(WriteBuffer != NULL && WriteBuffer->Position > 2);
 
 	int RequestSize = WriteBuffer->Position - 2;
 	if(RequestSize < 0xFFFF){
@@ -147,31 +144,15 @@ int ExecuteQuery(TQueryManagerConnection *Connection, bool AutoReconnect,
 	}
 
 	const int MaxAttempts = 2;
+	uint8 *Buffer = WriteBuffer->Buffer;
+	int BufferSize = WriteBuffer->Size;
+	int WriteSize = WriteBuffer->Position;
 	for(int Attempt = 1; true; Attempt += 1){
-		int WriteSize = WriteBuffer->Position;
-		if(!IsConnected(Connection)){
-			if(!AutoReconnect){
-				return QUERY_STATUS_FAILED;
-			}
-
-			// IMPORTANT(fusion): There is no way around this. `Connect` will
-			// use the connection buffer to send the login query so we need to
-			// save and restore it to not lose any data. One improvement here
-			// would be to use a stack or statically allocated buffer, although
-			// using malloc/free should have no real impact on performance as
-			// we're already doing BLOCKING I/O here.
-			uint8 *TempBuffer = (uint8*)malloc(WriteSize);
-			memcpy(TempBuffer, Connection->Buffer, WriteSize);
-			bool Reconnected = Connect(Connection);
-			memcpy(Connection->Buffer, TempBuffer, WriteSize);
-			free(TempBuffer);
-
-			if(!Reconnected){
-				return QUERY_STATUS_FAILED;
-			}
+		if(!IsConnected(Connection) && (!AutoReconnect || !Connect(Connection))){
+			return QUERY_STATUS_FAILED;
 		}
 
-		if(!WriteExact(Connection->Socket, Connection->Buffer, WriteSize)){
+		if(!WriteExact(Connection->Socket, Buffer, WriteSize)){
 			Disconnect(Connection);
 			if(Attempt >= MaxAttempts){
 				LOG_ERR("Failed to write request");
@@ -200,20 +181,20 @@ int ExecuteQuery(TQueryManagerConnection *Connection, bool AutoReconnect,
 			ResponseSize = BufferRead32LE(Help);
 		}
 
-		if(ResponseSize <= 0 || ResponseSize > (int)sizeof(Connection->Buffer)){
+		if(ResponseSize <= 0 || ResponseSize > BufferSize){
 			Disconnect(Connection);
 			LOG_ERR("Invalid response size %d (BufferSize: %d)",
-					ResponseSize, (int)sizeof(Connection->Buffer));
+					ResponseSize, BufferSize);
 			return QUERY_STATUS_FAILED;
 		}
 
-		if(!ReadExact(Connection->Socket, Connection->Buffer, ResponseSize)){
+		if(!ReadExact(Connection->Socket, Buffer, ResponseSize)){
 			Disconnect(Connection);
 			LOG_ERR("Failed to read response");
 			return QUERY_STATUS_FAILED;
 		}
 
-		TReadBuffer ReadBuffer(Connection->Buffer, ResponseSize);
+		TReadBuffer ReadBuffer(Buffer, ResponseSize);
 		int Status = ReadBuffer.Read8();
 		if(OutReadBuffer){
 			*OutReadBuffer = ReadBuffer;
@@ -225,7 +206,8 @@ int ExecuteQuery(TQueryManagerConnection *Connection, bool AutoReconnect,
 int LoginAccount(int AccountID, const char *Password, const char *IPAddress,
 		int MaxCharacters, int *NumCharacters, TCharacterLoginData *Characters,
 		int *PremiumDays){
-	TWriteBuffer WriteBuffer = PrepareQuery(g_QueryManagerConnection, 11);
+	uint8 Buffer[KB(4)];
+	TWriteBuffer WriteBuffer = PrepareQuery(QUERY_LOGIN_ACCOUNT, Buffer, sizeof(Buffer));
 	WriteBuffer.Write32((uint32)AccountID);
 	WriteBuffer.WriteString(Password);
 	WriteBuffer.WriteString(IPAddress);
@@ -261,12 +243,45 @@ int LoginAccount(int AccountID, const char *Password, const char *IPAddress,
 	return Result;
 }
 
+int GetWorld(const char *WorldName, TWorld *OutWorld){
+	ASSERT(WorldName && OutWorld);
+	uint8 Buffer[4096];
+	TReadBuffer ReadBuffer;
+	TWriteBuffer WriteBuffer = PrepareQuery(QUERY_GET_WORLDS, Buffer, sizeof(Buffer));
+	int Status = ExecuteQuery(g_QueryManagerConnection, true, &WriteBuffer, &ReadBuffer);
+	int Result = (Status == QUERY_STATUS_OK ? 0 : -1);
+	memset(OutWorld, 0, sizeof(TWorld));
+	if(Status == QUERY_STATUS_OK){
+		int NumWorlds = (int)ReadBuffer.Read8();
+		for(int i = 0; i < NumWorlds; i += 1){
+			TWorld World = {};
+			ReadBuffer.ReadString(World.Name, sizeof(World.Name));
+			World.Type = (int)ReadBuffer.Read8();
+			World.NumPlayers = (int)ReadBuffer.Read16();
+			World.MaxPlayers = (int)ReadBuffer.Read16();
+			World.OnlinePeak = (int)ReadBuffer.Read16();
+			World.OnlinePeakTimestamp = (int)ReadBuffer.Read32();
+			World.LastStartup = (int)ReadBuffer.Read32();
+			World.LastShutdown = (int)ReadBuffer.Read32();
+
+			if(StringEmpty(WorldName)){
+				// NOTE(fusion): Pick the world with the most players.
+				if(i == 0 || World.NumPlayers > OutWorld->NumPlayers){
+					*OutWorld = World;
+				}
+			}else if(StringEqCI(WorldName, World.Name)){
+				*OutWorld = World;
+				break;
+			}
+		}
+	}else{
+		LOG_ERR("Request failed");
+	}
+	return Result;
+}
+
 bool InitQuery(void){
 	ASSERT(g_QueryManagerConnection == NULL);
-
-	LOG("QueryManagerHost: %s", g_QueryManagerHost);
-	LOG("QueryManagerPort: %d", g_QueryManagerPort);
-
 	g_QueryManagerConnection = (TQueryManagerConnection*)calloc(1, sizeof(TQueryManagerConnection));
 	g_QueryManagerConnection->Socket = -1;
 	if(!Connect(g_QueryManagerConnection)){
@@ -283,3 +298,4 @@ void ExitQuery(void){
 		g_QueryManagerConnection = NULL;
 	}
 }
+

@@ -1,33 +1,30 @@
-#include "login.hh"
+#include "common.hh"
 
-// TODO(fusion): Support windows eventually?
-#if OS_LINUX
-#	include <errno.h>
-#	include <fcntl.h>
-#	include <netinet/in.h>
-#	include <poll.h>
-#	include <sys/socket.h>
-#	include <unistd.h>
-#	include <time.h>
-#else
-#	error "Operating system not currently supported."
-#endif
+#include <errno.h>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 #if TIBIA772
-static const int TERMINALVERSION[]	= {772, 772, 772};
+static const int TERMINALVERSION[] = {772, 772, 772};
 #else
-static const int TERMINALVERSION[]	= {770, 770, 770};
+static const int TERMINALVERSION[] = {770, 770, 770};
 #endif
 
-static RSAKey *g_PrivateKey			= NULL;
-static int g_Listener				= -1;
-static TConnection *g_Connections	= NULL;
+static RSAKey *g_PrivateKey;
+
+static int g_Listener = -1;
+static TConnection *g_Connections;
+static int g_MaxConnections;
+
+static TStatusRecord *g_StatusRecords;
+static int g_MaxStatusRecords;
 
 // Connection Handling
 //==============================================================================
-// NOTE(fusion): This is very similar to the connection handling code used by the
-// query manager with a few subtle differences including the encryption scheme.
-int ListenerBind(uint16 Port){
+static int ListenerBind(uint16 Port){
 	int Socket = socket(AF_INET, SOCK_STREAM, 0);
 	if(Socket == -1){
 		LOG_ERR("Failed to create listener socket: (%d) %s", errno, strerrordesc_np(errno));
@@ -73,7 +70,7 @@ int ListenerBind(uint16 Port){
 	return Socket;
 }
 
-int ListenerAccept(int Listener, uint32 *OutAddr, uint16 *OutPort){
+static int ListenerAccept(int Listener, uint32 *OutAddr, uint16 *OutPort){
 	while(true){
 		sockaddr_in SocketAddr = {};
 		socklen_t SocketAddrLen = sizeof(SocketAddr);
@@ -110,16 +107,16 @@ int ListenerAccept(int Listener, uint32 *OutAddr, uint16 *OutPort){
 	}
 }
 
-void CloseConnection(TConnection *Connection){
+static void CloseConnection(TConnection *Connection){
 	if(Connection->Socket != -1){
 		close(Connection->Socket);
 		Connection->Socket = -1;
 	}
 }
 
-TConnection *AssignConnection(int Socket, uint32 Addr, uint16 Port){
+static TConnection *AssignConnection(int Socket, uint32 Addr, uint16 Port){
 	int ConnectionIndex = -1;
-	for(int i = 0; i < g_MaxConnections; i += 1){
+	for(int i = 0; i < g_Config.MaxConnections; i += 1){
 		if(g_Connections[i].State == CONNECTION_FREE){
 			ConnectionIndex = i;
 			break;
@@ -129,22 +126,25 @@ TConnection *AssignConnection(int Socket, uint32 Addr, uint16 Port){
 	TConnection *Connection = NULL;
 	if(ConnectionIndex != -1){
 		Connection = &g_Connections[ConnectionIndex];
-		Connection->State = CONNECTION_HANDSHAKE;
+		Connection->State = CONNECTION_READING;
 		Connection->Socket = Socket;
-		Connection->StartTime = g_MonotonicTimeMS;
+		Connection->IPAddress = (int)Addr;
+		Connection->StartTime = GetMonotonicUptime();
 		Connection->RandomSeed = (uint32)rand();
-		snprintf(Connection->IPAddress, sizeof(Connection->IPAddress),
-				"%d.%d.%d.%d", ((int)(Addr >> 24) & 0xFF), ((int)(Addr >> 16) & 0xFF),
-				((int)(Addr >>  8) & 0xFF), ((int)(Addr >>  0) & 0xFF));
-		snprintf(Connection->RemoteAddress, sizeof(Connection->RemoteAddress),
-				"%s:%d", Connection->IPAddress, (int)Port);
+		StringBufFormat(Connection->RemoteAddress,
+				"%d.%d.%d.%d:%d",
+				((Connection->IPAddress >> 24) & 0xFF),
+				((Connection->IPAddress >> 16) & 0xFF),
+				((Connection->IPAddress >>	8) & 0xFF),
+				((Connection->IPAddress >>	0) & 0xFF),
+				(int)Port);
 		LOG("Connection %s assigned to slot %d",
 				Connection->RemoteAddress, ConnectionIndex);
 	}
 	return Connection;
 }
 
-void ReleaseConnection(TConnection *Connection){
+static void ReleaseConnection(TConnection *Connection){
 	if(Connection->State != CONNECTION_FREE){
 		LOG("Connection %s released", Connection->RemoteAddress);
 		CloseConnection(Connection);
@@ -153,12 +153,12 @@ void ReleaseConnection(TConnection *Connection){
 	}
 }
 
-void CheckConnectionInput(TConnection *Connection, int Events){
-	if((Events & POLLIN) == 0 || Connection->Socket == -1){
+static void CheckConnectionInput(TConnection *Connection, int Events){
+	if(Connection->Socket == -1 || (Events & POLLIN) == 0){
 		return;
 	}
 
-	if(Connection->State != CONNECTION_HANDSHAKE){
+	if(Connection->State != CONNECTION_READING){
 		LOG_ERR("Connection %s (State: %d) sending out-of-order data",
 				Connection->RemoteAddress, Connection->State);
 		CloseConnection(Connection);
@@ -166,13 +166,8 @@ void CheckConnectionInput(TConnection *Connection, int Events){
 	}
 
 	while(true){
-		int ReadSize = Connection->RWSize;
-		if(ReadSize == 0){
-			ReadSize = 2 - Connection->RWPosition;
-			ASSERT(ReadSize > 0);
-		}
-
-		int BytesRead = read(Connection->Socket,
+		int ReadSize = (Connection->RWSize > 0 ? Connection->RWSize : 2);
+		int BytesRead = (int)read(Connection->Socket,
 				(Connection->Buffer + Connection->RWPosition),
 				(ReadSize           - Connection->RWPosition));
 		if(BytesRead == -1){
@@ -189,9 +184,12 @@ void CheckConnectionInput(TConnection *Connection, int Events){
 
 		Connection->RWPosition += BytesRead;
 		if(Connection->RWPosition >= ReadSize){
-			if(Connection->RWSize == 0){
-				int PayloadSize = BufferRead16LE(Connection->Buffer);
-				if(PayloadSize <= 0 || PayloadSize > NARRAY(Connection->Buffer)){
+			if(Connection->RWSize != 0){
+				Connection->State = CONNECTION_PROCESSING;
+				break;
+			}else if(Connection->RWPosition == 2){
+				int PayloadSize = (int)BufferRead16LE(Connection->Buffer);
+				if(PayloadSize <= 0 || PayloadSize > (int)sizeof(Connection->Buffer)){
 					CloseConnection(Connection);
 					break;
 				}
@@ -199,28 +197,54 @@ void CheckConnectionInput(TConnection *Connection, int Events){
 				Connection->RWSize = PayloadSize;
 				Connection->RWPosition = 0;
 			}else{
-				Connection->State = CONNECTION_LOGIN;
-				break;
+				PANIC("Invalid input state (State: %d, RWSize: %d, RWPosition: %d)",
+						Connection->State, Connection->RWSize, Connection->RWPosition);
 			}
 		}
 	}
-
-	if(Connection->State == CONNECTION_LOGIN){
-		ProcessLoginRequest(Connection);
-	}
 }
 
-void CheckConnectionOutput(TConnection *Connection, int Events){
-	if((Events & POLLOUT) == 0 || Connection->Socket == -1){
+static void CheckConnectionRequest(TConnection *Connection){
+	if(Connection->Socket == -1){
 		return;
 	}
 
-	if(Connection->State != CONNECTION_WRITE){
+	if(Connection->State != CONNECTION_PROCESSING){
+		return;
+	}
+
+	// PARANOID(fusion): A non-empty payload is guaranteed, due to how we parse
+	// input in `CheckConnectionInput` just above.
+	ASSERT(Connection->RWSize > 0);
+
+	int Command = Connection->Buffer[0];
+	if(Command == 1){
+		ProcessLoginRequest(Connection);
+	}else if(Command == 255){
+		ProcessStatusRequest(Connection);
+	}else{
+		LOG_ERR("Invalid command %d from %s (expected 1 or 255)",
+				Command, Connection->RemoteAddress);
+		CloseConnection(Connection);
+	}
+}
+
+static void CheckConnectionOutput(TConnection *Connection, int Events){
+	// NOTE(fusion): We're only polling `POLLOUT` when the connection is WRITING,
+	// but we want to allow requests to complete in a single cycle, so we always
+	// check for output if the connection is WRITING.
+	(void)Events;
+
+	if(Connection->Socket == -1){
+		return;
+	}
+
+	if(Connection->State != CONNECTION_WRITING){
 		return;
 	}
 
 	while(true){
-		int BytesWritten = write(Connection->Socket,
+		int BytesWritten = (int)write(Connection->Socket,
 				(Connection->Buffer + Connection->RWPosition),
 				(Connection->RWSize - Connection->RWPosition));
 		if(BytesWritten == -1){
@@ -238,18 +262,18 @@ void CheckConnectionOutput(TConnection *Connection, int Events){
 	}
 }
 
-void CheckConnection(TConnection *Connection, int Events){
+static void CheckConnection(TConnection *Connection, int Events){
 	ASSERT((Events & POLLNVAL) == 0);
 
 	if((Events & (POLLERR | POLLHUP)) != 0){
 		CloseConnection(Connection);
 	}
 
-	if(g_LoginTimeout > 0){
-		int LoginTime = (g_MonotonicTimeMS - Connection->StartTime);
-		if(LoginTime >= g_LoginTimeout){
-			LOG_WARN("Connection %s TIMEDOUT (LoginTime: %dms, Timeout: %dms)",
-					Connection->RemoteAddress, LoginTime, g_LoginTimeout);
+	if(g_Config.ConnectionTimeout > 0){
+		int ElapsedTime = GetMonotonicUptime() - Connection->StartTime;
+		if(ElapsedTime >= g_Config.ConnectionTimeout){
+			LOG_WARN("Connection %s TIMEDOUT (ElapsedTime: %ds, Timeout: %ds)",
+					Connection->RemoteAddress, ElapsedTime, g_Config.ConnectionTimeout);
 			CloseConnection(Connection);
 		}
 	}
@@ -259,8 +283,12 @@ void CheckConnection(TConnection *Connection, int Events){
 	}
 }
 
-void ProcessConnections(void){
-	// NOTE(fusion): Accept new connections.
+static void AcceptConnections(int Events){
+	ASSERT(g_Listener != -1);
+	if((Events & POLLIN) == 0){
+		return;
+	}
+
 	while(true){
 		uint32 Addr;
 		uint16 Port;
@@ -270,56 +298,78 @@ void ProcessConnections(void){
 		}
 
 		if(AssignConnection(Socket, Addr, Port) == NULL){
-			LOG_ERR("Rejecting connection from %08X:%d due to max number of"
-					" connections being reached (%d)", Addr, Port, g_MaxConnections);
+			LOG_ERR("Rejecting connection %08X:%d:"
+					" max number of connections reached (%d)",
+					Addr, Port, g_Config.MaxConnections);
 			close(Socket);
 		}
 	}
+}
 
-	// NOTE(fusion): Gather active connections.
-	int NumConnections = 0;
-	int *ConnectionIndices = (int*)alloca(g_MaxConnections * sizeof(int));
-	pollfd *ConnectionFds  = (pollfd*)alloca(g_MaxConnections * sizeof(pollfd));
-	for(int i = 0; i < g_MaxConnections; i += 1){
-		if(g_Connections[i].State == CONNECTION_FREE || g_Connections[i].Socket == -1){
+void ProcessConnections(void){
+	int NumFds = 0;
+	int MaxFds = g_MaxConnections + 1;
+	pollfd *Fds = (pollfd*)alloca(MaxFds * sizeof(pollfd));
+	int *ConnectionIndices = (int*)alloca(MaxFds * sizeof(int));
+
+	if(g_Listener != -1){
+		Fds[NumFds].fd = g_Listener;
+		Fds[NumFds].events = POLLIN;
+		Fds[NumFds].revents = 0;
+		ConnectionIndices[NumFds] = -1;
+		NumFds += 1;
+	}
+
+	for(int i = 0; i < g_Config.MaxConnections; i += 1){
+		if(g_Connections[i].State == CONNECTION_FREE){
 			continue;
 		}
 
-		ConnectionIndices[NumConnections] = i;
-		ConnectionFds[NumConnections].fd = g_Connections[i].Socket;
-		ConnectionFds[NumConnections].events = POLLIN | POLLOUT;
-		ConnectionFds[NumConnections].revents = 0;
-		NumConnections += 1;
+		Fds[NumFds].fd = g_Connections[i].Socket;
+		Fds[NumFds].events = POLLIN;
+		if(g_Connections[i].State == CONNECTION_WRITING){
+			Fds[NumFds].events |= POLLOUT;
+		}
+		Fds[NumFds].revents = 0;
+		ConnectionIndices[NumFds] = i;
+		NumFds += 1;
 	}
 
-	if(NumConnections <= 0){
-		return;
-	}
-
-	// NOTE(fusion): Poll connections.
-	int NumEvents = poll(ConnectionFds, NumConnections, 0);
+	// NOTE(fusion): Block for 1 second at most, so we can properly timeout
+	// idle connections.
+	ASSERT(NumFds > 0);
+	int NumEvents = poll(Fds, NumFds, 1);
 	if(NumEvents == -1){
-		LOG_ERR("Failed to poll connections: (%d) %s", errno, strerrordesc_np(errno));
+		if(errno != ETIMEDOUT && errno != EINTR){
+			LOG_ERR("Failed to poll connections: (%d) %s",
+					errno, strerrordesc_np(errno));
+		}
 		return;
 	}
 
 	// NOTE(fusion): Process connections.
-	for(int i = 0; i < NumConnections; i += 1){
-		TConnection *Connection = &g_Connections[ConnectionIndices[i]];
-		int Events = (int)ConnectionFds[i].revents;
-		CheckConnectionInput(Connection, Events);
-		CheckConnectionOutput(Connection, Events);
-		CheckConnection(Connection, Events);
+	for(int i = 0; i < NumFds; i += 1){
+		int Index = ConnectionIndices[i];
+		int Events = (int)Fds[i].revents;
+		if(Index >= 0 && Index < g_Config.MaxConnections){
+			TConnection *Connection = &g_Connections[Index];
+			CheckConnectionInput(Connection, Events);
+			CheckConnectionRequest(Connection);
+			CheckConnectionOutput(Connection, Events);
+			CheckConnection(Connection, Events);
+		}else if(Index == -1 && Fds[i].fd == g_Listener){
+			AcceptConnections(Events);
+		}else{
+			LOG_ERR("Unknown connection index %d", Index);
+		}
 	}
 }
 
 bool InitConnections(void){
+	ASSERT(g_PrivateKey == NULL);
 	ASSERT(g_Listener == -1);
 	ASSERT(g_Connections == NULL);
-
-	LOG("Login port: %d", g_LoginPort);
-	LOG("Max connections: %d", g_MaxConnections);
-	LOG("Login timeout: %dms", g_LoginTimeout);
+	ASSERT(g_StatusRecords == NULL);
 
 	g_PrivateKey = RSALoadPEM("tibia.pem");
 	if(g_PrivateKey == NULL){
@@ -327,16 +377,22 @@ bool InitConnections(void){
 		return false;
 	}
 
-	g_Listener = ListenerBind(g_LoginPort);
+	g_Listener = ListenerBind((uint16)g_Config.LoginPort);
 	if(g_Listener == -1){
-		LOG_ERR("Failed to bind listener");
+		LOG_ERR("Failed to bind listener to port %d", g_Config.LoginPort);
 		return false;
 	}
 
-	g_Connections = (TConnection*)calloc(g_MaxConnections, sizeof(TConnection));
+	g_MaxConnections = g_Config.MaxConnections;
+	g_Connections = (TConnection*)calloc(
+			g_MaxConnections, sizeof(TConnection));
 	for(int i = 0; i < g_MaxConnections; i += 1){
 		g_Connections[i].State = CONNECTION_FREE;
 	}
+
+	g_MaxStatusRecords = g_Config.MaxStatusRecords;
+	g_StatusRecords = (TStatusRecord*)calloc(
+			g_MaxStatusRecords, sizeof(TStatusRecord));
 
 	return true;
 }
@@ -360,13 +416,18 @@ void ExitConnections(void){
 		free(g_Connections);
 		g_Connections = NULL;
 	}
+
+	if(g_StatusRecords != NULL){
+		free(g_StatusRecords);
+		g_StatusRecords = NULL;
+	}
 }
 
-// Connection Requests
+// Login Request
 //==============================================================================
-TWriteBuffer PrepareResponse(TConnection *Connection){
-	if(Connection->State != CONNECTION_LOGIN){
-		LOG_ERR("Connection %s is not processing login (State: %d)",
+static TWriteBuffer PrepareXTEAResponse(TConnection *Connection){
+	if(Connection->State != CONNECTION_PROCESSING){
+		LOG_ERR("Connection %s is not PROCESSING (State: %d)",
 				Connection->RemoteAddress, Connection->State);
 		CloseConnection(Connection);
 		return TWriteBuffer(NULL, 0);
@@ -378,9 +439,9 @@ TWriteBuffer PrepareResponse(TConnection *Connection){
 	return WriteBuffer;
 }
 
-void SendResponse(TConnection *Connection, TWriteBuffer *WriteBuffer){
-	if(Connection->State != CONNECTION_LOGIN){
-		LOG_ERR("Connection %s is not processing login (State: %d)",
+static void SendXTEAResponse(TConnection *Connection, TWriteBuffer *WriteBuffer){
+	if(Connection->State != CONNECTION_PROCESSING){
+		LOG_ERR("Connection %s is not PROCESSING (State: %d)",
 				Connection->RemoteAddress, Connection->State);
 		CloseConnection(Connection);
 		return;
@@ -410,25 +471,25 @@ void SendResponse(TConnection *Connection, TWriteBuffer *WriteBuffer){
 	XTEAEncrypt(Connection->XTEA,
 			WriteBuffer->Buffer + 2,
 			WriteBuffer->Position - 2);
-	Connection->State = CONNECTION_WRITE;
+	Connection->State = CONNECTION_WRITING;
 	Connection->RWSize = WriteBuffer->Position;
 	Connection->RWPosition = 0;
 }
 
-void SendLoginError(TConnection *Connection, const char *Message){
-	TWriteBuffer WriteBuffer = PrepareResponse(Connection);
+static void SendLoginError(TConnection *Connection, const char *Message){
+	TWriteBuffer WriteBuffer = PrepareXTEAResponse(Connection);
 	WriteBuffer.Write8(10); // LOGIN_ERROR
 	WriteBuffer.WriteString(Message);
-	SendResponse(Connection, &WriteBuffer);
+	SendXTEAResponse(Connection, &WriteBuffer);
 }
 
-void SendCharacterList(TConnection *Connection, int NumCharacters,
+static void SendCharacterList(TConnection *Connection, int NumCharacters,
 		TCharacterLoginData *Characters, int PremiumDays){
-	TWriteBuffer WriteBuffer = PrepareResponse(Connection);
+	TWriteBuffer WriteBuffer = PrepareXTEAResponse(Connection);
 
-	if(g_Motd[0] != 0){
+	if(g_Config.Motd[0] != 0){
 		WriteBuffer.Write8(20); // MOTD
-		WriteBuffer.WriteString(g_Motd);
+		WriteBuffer.WriteString(g_Config.Motd);
 	}
 
 	WriteBuffer.Write8(100); // CHARACTER_LIST
@@ -444,35 +505,28 @@ void SendCharacterList(TConnection *Connection, int NumCharacters,
 	}
 	WriteBuffer.Write16((uint16)PremiumDays);
 
-	SendResponse(Connection, &WriteBuffer);
+	SendXTEAResponse(Connection, &WriteBuffer);
 }
 
 void ProcessLoginRequest(TConnection *Connection){
 	if(Connection->RWSize != 145){
-		LOG_ERR("Invalid login request size %d from %s (expected 145)",
-				Connection->RWSize, Connection->RemoteAddress);
+		LOG_ERR("Invalid login request size from %s (expected 145, got %d)",
+				Connection->RemoteAddress, Connection->RWSize);
 		CloseConnection(Connection);
 		return;
 	}
 
-	TReadBuffer InputBuffer(Connection->Buffer, Connection->RWSize);
-	int Command = InputBuffer.Read8();
-	if(Command != 1){
-		LOG_ERR("Invalid login command %d from %s (expected 1)",
-				Command, Connection->RemoteAddress);
-		CloseConnection(Connection);
-		return;
-	}
-
-	int TerminalType = InputBuffer.Read16();
-	int TerminalVersion = InputBuffer.Read16();
-	InputBuffer.Read32(); // DATSIGNATURE
-	InputBuffer.Read32(); // SPRSIGNATURE
-	InputBuffer.Read32(); // PICSIGNATURE
+	TReadBuffer ReadBuffer(Connection->Buffer, Connection->RWSize);
+	ReadBuffer.Read8(); // always 1 for a login request
+	int TerminalType = ReadBuffer.Read16();
+	int TerminalVersion = ReadBuffer.Read16();
+	ReadBuffer.Read32(); // DATSIGNATURE
+	ReadBuffer.Read32(); // SPRSIGNATURE
+	ReadBuffer.Read32(); // PICSIGNATURE
 
 	uint8 AsymmetricData[128];
-	InputBuffer.ReadBytes(AsymmetricData, sizeof(AsymmetricData));
-	if(InputBuffer.Overflowed()){
+	ReadBuffer.ReadBytes(AsymmetricData, sizeof(AsymmetricData));
+	if(ReadBuffer.Overflowed()){
 		LOG_ERR("Input buffer overflowed while reading login command from %s",
 				Connection->RemoteAddress);
 		CloseConnection(Connection);
@@ -489,17 +543,17 @@ void ProcessLoginRequest(TConnection *Connection){
 		return;
 	}
 
-	TReadBuffer Buffer(AsymmetricData, sizeof(AsymmetricData));
-	Buffer.Read8(); // always zero
-	Connection->XTEA[0] = Buffer.Read32();
-	Connection->XTEA[1] = Buffer.Read32();
-	Connection->XTEA[2] = Buffer.Read32();
-	Connection->XTEA[3] = Buffer.Read32();
+	ReadBuffer = TReadBuffer(AsymmetricData, sizeof(AsymmetricData));
+	ReadBuffer.Read8(); // always zero
+	Connection->XTEA[0] = ReadBuffer.Read32();
+	Connection->XTEA[1] = ReadBuffer.Read32();
+	Connection->XTEA[2] = ReadBuffer.Read32();
+	Connection->XTEA[3] = ReadBuffer.Read32();
 
 	char Password[30];
-	int AccountID = Buffer.Read32();
-	Buffer.ReadString(Password, sizeof(Password));
-	if(Buffer.Overflowed()){
+	int AccountID = ReadBuffer.Read32();
+	ReadBuffer.ReadString(Password, sizeof(Password));
+	if(ReadBuffer.Overflowed()){
 		LOG_ERR("Malformed asymmetric data from %s", Connection->RemoteAddress);
 		CloseConnection(Connection);
 		return;
@@ -519,10 +573,17 @@ void ProcessLoginRequest(TConnection *Connection){
 		return;
 	}
 
+	char IPString[16];
+	StringBufFormat(IPString, "%d.%d.%d.%d",
+			((Connection->IPAddress >> 24) & 0xFF),
+			((Connection->IPAddress >> 16) & 0xFF),
+			((Connection->IPAddress >>	8) & 0xFF),
+			((Connection->IPAddress >>	0) & 0xFF));
+
 	int NumCharacters = 0;
 	int PremiumDays = 0;
 	TCharacterLoginData Characters[50];
-	int LoginCode = LoginAccount(AccountID, Password, Connection->IPAddress,
+	int LoginCode = LoginAccount(AccountID, Password, IPString,
 			NARRAY(Characters), &NumCharacters, Characters, &PremiumDays);
 	switch(LoginCode){
 		case 0:{
@@ -565,3 +626,84 @@ void ProcessLoginRequest(TConnection *Connection){
 		}
 	}
 }
+
+// Status Request
+//==============================================================================
+static bool AllowStatusRequest(int IPAddress){
+	TStatusRecord *Record = NULL;
+	int LeastRecentlyUsedIndex = 0;
+	int LeastRecentlyUsedTime = g_StatusRecords[0].Timestamp;
+	int TimeNow = GetMonotonicUptime();
+	for(int i = 0; i < g_MaxStatusRecords; i += 1){
+		if(g_StatusRecords[i].Timestamp < LeastRecentlyUsedTime){
+			LeastRecentlyUsedIndex = i;
+			LeastRecentlyUsedTime = g_StatusRecords[i].Timestamp;
+		}
+
+		if(g_StatusRecords[i].IPAddress == IPAddress){
+			Record = &g_StatusRecords[i];
+			break;
+		}
+	}
+
+	bool Result = false;
+	if(Record == NULL){
+		Record = &g_StatusRecords[LeastRecentlyUsedIndex];
+		Record->IPAddress = IPAddress;
+		Record->Timestamp = TimeNow;
+		Result = true;
+	}else if((TimeNow - Record->Timestamp) >= g_Config.MinStatusInterval){
+		Record->Timestamp = TimeNow;
+		Result = true;
+	}
+
+	return Result;
+}
+
+static void SendStatusString(TConnection *Connection, const char *StatusString){
+	if(Connection->State != CONNECTION_PROCESSING){
+		LOG_ERR("Connection %s is not PROCESSING (State: %d)",
+				Connection->RemoteAddress, Connection->State);
+		CloseConnection(Connection);
+		return;
+	}
+
+	int Length = (int)strlen(StatusString);
+	if(Length > (int)sizeof(Connection->Buffer)){
+		Length = (int)sizeof(Connection->Buffer);
+	}
+
+	Connection->RWSize = Length;
+	Connection->RWPosition = 0;
+	memcpy(Connection->Buffer, StatusString, Length);
+	Connection->State = CONNECTION_WRITING;
+}
+
+void ProcessStatusRequest(TConnection *Connection){
+	if(!AllowStatusRequest(Connection->IPAddress)){
+		LOG_ERR("Too many status requests from %s", Connection->RemoteAddress);
+		CloseConnection(Connection);
+		return;
+	}
+
+	TReadBuffer ReadBuffer(Connection->Buffer, Connection->RWSize);
+	ReadBuffer.Read8(); // always 255 for a status request
+	int Format = (int)ReadBuffer.Read8();
+	if(Format == 255){ // XML
+		char Request[5] = {};
+		ReadBuffer.ReadBytes((uint8*)Request, 4);
+		if(StringEqCI(Request, "info")){
+			const char *StatusString = GetStatusString();
+			SendStatusString(Connection, StatusString);
+		}else{
+			LOG_WARN("Invalid status request \"%s\" from %s",
+					Request, Connection->RemoteAddress);
+			CloseConnection(Connection);
+		}
+	}else{
+		LOG_WARN("Invalid status format %d from %s",
+				Format, Connection->RemoteAddress);
+		CloseConnection(Connection);
+	}
+}
+

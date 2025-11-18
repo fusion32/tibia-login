@@ -1,4 +1,4 @@
-#include "login.hh"
+#include "common.hh"
 
 #include <openssl/err.h>
 #include <openssl/rsa.h>
@@ -7,7 +7,9 @@
 static void DumpOpenSSLErrors(const char *Where, const char *What){
 	LOG_ERR("OpenSSL error(s) while executing %s at %s:", What, Where);
 	ERR_print_errors_cb(
-		[](const char *str, usize len, void *u) -> int {
+		[](const char *str, size_t len, void *u) -> int {
+			(void)u;
+
 			// NOTE(fusion): These error strings already have trailing newlines,
 			// for whatever reason.
 			if(len > 0 && str[len - 1] == '\n'){

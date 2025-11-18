@@ -1,7 +1,7 @@
 # Service Config
 LoginPort            = 7171
 ConnectionTimeout    = 5s
-MaxConnections       = 5
+MaxConnections       = 10
 MaxStatusRecords     = 1024
 MinStatusInterval    = 5m
 QueryManagerHost     = "127.0.0.1"
@@ -12,7 +12,6 @@ QueryManagerPassword = "a6glaf0c"
 StatusWorld          = ""
 URL                  = ""
 Location             = ""
-Owner                = ""
 ServerType           = "Tibia"
 ServerVersion        = "7.7"
 ClientVersion        = "7.7"

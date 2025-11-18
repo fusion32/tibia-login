@@ -1,5 +1,7 @@
 .vscode
+.cache
 bin
 build
 local
-*.log
+config.cfg
+compile_commands.json
