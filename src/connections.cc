@@ -338,7 +338,7 @@ void ProcessConnections(void){
 	// NOTE(fusion): Block for 1 second at most, so we can properly timeout
 	// idle connections.
 	ASSERT(NumFds > 0);
-	int NumEvents = poll(Fds, NumFds, 1);
+	int NumEvents = poll(Fds, NumFds, 1000);
 	if(NumEvents == -1){
 		if(errno != ETIMEDOUT && errno != EINTR){
 			LOG_ERR("Failed to poll connections: (%d) %s",
